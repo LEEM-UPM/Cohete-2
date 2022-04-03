@@ -1,6 +1,6 @@
 #include <Wire.h>
-#include <SPI.h>
 #include <Adafruit_BMP280.h>
+#include <SPI.h>
 #include <SD.h>
 #include <TinyGPS.h>
 #include <SoftwareSerial.h>
@@ -15,7 +15,6 @@
 #define DEBUG 0
 
 
-
 // Lista de dispositivos del Cohete 2 7/ABR/22
 /*
    Módulo GPS NEO 6M
@@ -23,6 +22,7 @@
    Tarjeta SD
    EEPROM 24FC512
    Sensor Hall
+   Sensor de temperatura
 
    Apertura paracaidas electroimanes
    Zumbador alarma
@@ -30,16 +30,16 @@
 
 
 
-
 //-------------------------------------------------
-//              Parámetros Cobete
+//              Parámetros Cohete
 //-------------------------------------------------
+#define TIEMPO_LANZAMIENTO    240000       // ms (Tiempo de espera desde que hay señal GPS)
 #define ACC_START             5.0          // g
 #define T_MIN_PARACAIDAS      4000         // ms
 #define T_MAX_PARACAIDAS      13000        // ms
 #define DIF_ALTURA_APERTURA   20.0         // m
 #define DIF_ALTURA_ALARMA     200.0        // m
-#define T_MIN_ALARMA          2*60*1000    // ms
+#define T_MIN_ALARMA          30000        // ms
 
 
 //Control apertura
@@ -60,6 +60,7 @@ uint16_t t_inicio = 0;
 #define PIN_ELECTROIMAN   15  // (A1)
 #define PIN_PULSADOR      6
 #define PIN_HALL          7
+#define PIN_LM35          A0
 
 
 
@@ -84,7 +85,6 @@ File *archivo;
 #error "LEEM ERROR: No esta definido el buffer del SofwareSerial.h en 128 bytes. Hablar con Carlos/Andrés para solucionar problema"
 #endif
 SoftwareSerial ss(PIN_GPS_TX, PIN_GPS_RX);
-//static void smartdelay(unsigned long ms);
 float GPS_ALT;
 float GPS_VEL;
 float GPS_LON = TinyGPS::GPS_INVALID_ANGLE;
@@ -93,10 +93,12 @@ uint8_t GPS_SEC;
 uint8_t GPS_MIN;
 uint8_t GPS_HOU;
 uint8_t GPS_SAT;
+//static void smartdelay(unsigned long ms);
 
 
 // Presion
 Adafruit_BMP280 bmp;
+float presion_referencia;
 
 
 // EEPROM I2C
@@ -119,6 +121,7 @@ float Z_out;
 float T_BMP;
 float Altitud_BMP;
 float Presion_BMP;
+float T_EXT;
 float HALL;
 
 
@@ -138,6 +141,7 @@ void gps_wait_signal();
 boolean init_EEPROMI2C();
 
 
+
 void setup() {
 
 
@@ -151,7 +155,7 @@ void setup() {
   pinMode(PIN_ZUMBADOR, OUTPUT);
   pinMode(PIN_ELECTROIMAN, OUTPUT);
   pinMode(PIN_PULSADOR, INPUT_PULLUP);
-  pinMode(PIN_HALL, OUTPUT);
+  pinMode(PIN_HALL, INPUT);
 
 
   //SPISettings(1000000, MSBFIRST, SPI_MODE0);
@@ -169,11 +173,12 @@ void setup() {
   delay(50);
 
 
+  // Lectura de datos I2C
   /*
-  EEPROM_I2C_Lectura_datos();
-  while (true) {
+    EEPROM_I2C_Lectura_datos();
+    while (true) {
     delay(1);
-  }
+    }
   */
 
 
@@ -191,6 +196,7 @@ void setup() {
 #endif
     error_inicio();
   }
+
 
   if (!SD.begin(SSpin)) {
 #if DEBUG == 1
@@ -233,19 +239,63 @@ void setup() {
 #endif
   gps_wait_signal();
   digitalWrite(PIN_LED_ERROR, 0);
-  digitalWrite(PIN_LED_READY, 1);
 
 
 
-  // 3. ESPERA A ACELERACIÓN LANZAMIENTO
-  Z_out = 0.0;
+
+  // 3. PREVIO AL LANZAMIENTO
+  for (uint8_t i = 0; i < 50 ; i++) {
+    presion_referencia += bmp.readPressure();
+  }
+  presion_referencia = presion_referencia / 5000.0;
+
+
+
+
+  // 4. ESPERAR TIEMPO DE LANZAMIENTO
   uint16_t var = millis();
-  while (true) {
+  t_inicio = millis();
+  Z_out = 0.0;
+  while ((millis() - t_inicio) < TIEMPO_LANZAMIENTO) {
 
+    // Avisador acustico 1:
+    if ((millis() - var) >= 500) {
+      zumbador_on();
+      digitalWrite(PIN_LED_READY, 0);
+    }
+    if ((millis() - var) >= 1000) {
+      zumbador_off();
+      digitalWrite(PIN_LED_READY, 1);
+      var = millis();
+    }
+
+    // Por si accidentalmente se lanza antes, salir del bucle
     // Lectura de aceleración
     KX134_64g_read_acc();
+    if (abs(Z_out) > ACC_START * 2) {
+      zumbador_off();
+      archivo = &(SD.open("datos.txt", FILE_WRITE));
+      archivo->write(0x41);
+      archivo->write(0x41);     // 'DD'
+      archivo->flush();
+      archivo->close();
+      break;
+    }
+  }
 
-    // Avisador acustico:
+
+
+
+  // 5. DETECTAR ACELRERACIÓN MÁXIMA E INICIAR TOMA DE DATOS
+  digitalWrite(PIN_LED_READY, 1);
+  var = millis();
+  t_inicio = millis();
+  while (true) {
+
+    // Toma de datos
+    Toma_de_datos();
+
+    // Avisador acustico 2:
     if ((millis() - var) >= 800) {
       zumbador_on();
     }
@@ -254,16 +304,18 @@ void setup() {
       var = millis();
     }
 
-#if DEBUG == 1
-    //Serial.println(Z_out);
-#endif
-
     // Aceleración despegue detectada
     if (abs(Z_out) > ACC_START) {
       zumbador_off();
+      archivo = &(SD.open("datos.txt", FILE_WRITE));
+      archivo->write(0x41);
+      archivo->write(0x41);     // 'DD'
+      archivo->flush();
+      archivo->close();
       break;
     }
   }
+
   digitalWrite(PIN_LED_ERROR, 1);
   t_inicio = millis();
 
@@ -275,15 +327,60 @@ void loop()
 {
 
 
+  Toma_de_datos();
+
+  
+  // CONTROL DEL PARACAIDAS
+  if (Altitud_BMP > alt_max && (FLIGHT_TIME < T_MIN_PARACAIDAS)) {
+    alt_max = Altitud_BMP;
+  }
+
+  if ( (alt_max > (Altitud_BMP + DIF_ALTURA_APERTURA) && FLIGHT_TIME < T_MIN_PARACAIDAS)  ||  FLIGHT_TIME > T_MAX_PARACAIDAS)  {
+    paracaidas_open();
+    digitalWrite(PIN_LED_ERROR, 0);
+    archivo = &(SD.open("datos.txt", FILE_WRITE));
+    archivo->write(0x41);
+    archivo->write(0x41);     // 'AA'
+    archivo->flush();
+    archivo->close();
+    alt_max = 8000.0;
+  }
+
+
+
+  // CONTROL DE ACTIVACION DE ALARMA
+  if ( (alt_max > (Altitud_BMP + DIF_ALTURA_ALARMA)) || FLIGHT_TIME > T_MIN_ALARMA)  {
+    zumbador_on();
+  }
+
+  delay(10);
+
+}
+
+
+
+
+/********************************************************
+                     Toma de datos
+*********************************************************/
+
+void Toma_de_datos() {
+
+
   // Lectura de datos:
   T_BMP = bmp.readTemperature();
   Presion_BMP = bmp.readPressure();
-  Altitud_BMP = bmp.readAltitude(1013.25);
+  Altitud_BMP = bmp.readAltitude(presion_referencia);
   KX134_64g_read_acc();
   gps_read();
 
   // Hall
   HALL = digitalRead(PIN_HALL);
+
+  // Temperatura LM35
+  T_EXT = analogRead(PIN_LM35);
+  T_EXT = T_EXT * 0.488759;
+
 
 
   // Datos serie (solo DEBUG)
@@ -293,6 +390,8 @@ void loop()
   Serial.print(Y_out);
   Serial.write('\t');
   Serial.print(Z_out);
+  Serial.write('\t');
+  Serial.print(T_EXT);
   Serial.write('\t');
   Serial.print(Presion_BMP);
   Serial.write('\t');
@@ -312,8 +411,6 @@ void loop()
   Serial.write(':');
   Serial.print(GPS_SEC);
   Serial.write('\t');
-  Serial.print(GPS_VEL);
-  Serial.write('\t');
   Serial.print(GPS_SAT);
   Serial.write('\n');
   Serial.print(HALL);
@@ -321,39 +418,8 @@ void loop()
 #endif
 
 
-  // Escritura SD
-  //archivo->write(FLIGHT_TIME, 2);
-  archivo = &(SD.open("datos.txt", FILE_WRITE));
-  archivo->write(44);
-  archivo->write((byte*)(&X_out), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&Y_out), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&Z_out), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&Presion_BMP), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&Altitud_BMP), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&T_BMP), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&HALL), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&GPS_ALT), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&GPS_LAT), 4);
-  archivo->write(44);
-  archivo->write((byte*)(&GPS_LON), 4);
-  archivo->write(44);
-  archivo->write(GPS_HOU);
-  archivo->write(44);
-  archivo->write(GPS_MIN);
-  archivo->write(44);
-  archivo->write(GPS_SEC);
-  archivo->write(59); // 'EE'
-  archivo->write(10);
-  archivo->flush();
-  archivo->close();
+  // Tarjeta SD
+  SD_Almacena_datos();
 
 
   // EEPROM INTERNA (si procede cada T_ALMACENAMIENTO)
@@ -363,40 +429,47 @@ void loop()
   // EEPROM I2C
   EEPROM_I2C_Almacena_datos();
 
-
-
-  // CONTROL DEL PARACAIDAS
-  if (Altitud_BMP > alt_max && (FLIGHT_TIME < T_MIN_PARACAIDAS)) {
-    alt_max = Altitud_BMP;
-  }
-
-  if ( (alt_max > (Altitud_BMP + DIF_ALTURA_APERTURA) && FLIGHT_TIME < T_MIN_PARACAIDAS)  ||  FLIGHT_TIME > T_MAX_PARACAIDAS)  {
-    paracaidas_open();
-    digitalWrite(PIN_LED_ERROR, 0);
-  }
-
-
-  // CONTROL DE ACTIVACION DE ALARMA
-  if ( (alt_max > (Altitud_BMP + DIF_ALTURA_ALARMA))   ||  FLIGHT_TIME > T_MIN_ALARMA)  {
-    zumbador_on();
-  }
-
-  delay(10);
-
 }
 
 
 
 
 /********************************************************
-                       Lectura SD
+                       Escritura SD
 *********************************************************/
+
+
+void SD_Almacena_datos() {
+  // Escritura SD
+  archivo = &(SD.open("datos.txt", FILE_WRITE));
+  archivo->write((byte)((FLIGHT_TIME & 0xFF00) >> 8));
+  archivo->write((byte)(FLIGHT_TIME & 0x00FF));
+  archivo->write((byte*)(&X_out), 4);
+  archivo->write((byte*)(&Y_out), 4);
+  archivo->write((byte*)(&Z_out), 4);
+  archivo->write((byte*)(&T_EXT), 4);
+  archivo->write((byte*)(&Presion_BMP), 4);
+  archivo->write((byte*)(&Altitud_BMP), 4);
+  archivo->write((byte*)(&T_BMP), 4);
+  archivo->write((byte*)(&HALL), 4);
+  archivo->write((byte*)(&GPS_ALT), 4);
+  archivo->write((byte*)(&GPS_LAT), 4);
+  archivo->write((byte*)(&GPS_LON), 4);
+  archivo->write((byte*)(&GPS_VEL), 4); 
+  archivo->write(GPS_HOU);
+  archivo->write(GPS_MIN);
+  archivo->write(GPS_SEC);
+  archivo->write(0x45);
+  archivo->write(0x45);     // 'EE'
+  archivo->flush();
+  archivo->close();
+}
 
 
 
 
 /********************************************************
-                     EEPROM  EXTERNA I2C
+                  EEPROM EXTERNA I2C
 *********************************************************/
 
 boolean init_EEPROMI2C() {
@@ -421,7 +494,6 @@ void EEPROM_I2C_Almacena_datos() {
   float_to_4byte(&GPS_LAT, &(paquete[20]));
   float_to_4byte(&GPS_LON, &(paquete[24]));
   uint16_to_2byte(FLIGHT_TIME, &(paquete[28]));
-
 
   writeEEPROM_Page(eeprom_mem, paquete, 30);
   eeprom_mem += 30;
@@ -593,28 +665,40 @@ boolean gps_init_NEO6M() {
 
   // Configuración GPS NEO6M
   ss.begin(9600);
-  ss.print("$PUBX,40,GLL,0,0,0,0*5C\r\n");
-  ss.print("$PUBX,40,ZDA,0,0,0,0*44\r\n");
-  ss.print("$PUBX,40,VTG,0,0,0,0*5E\r\n");
-  ss.print("$PUBX,40,GSV,0,0,0,0*59\r\n");
-  ss.print("$PUBX,40,GSA,0,0,0,0*4E\r\n");
-  ss.print("$PUBX,40,RMC,0,0,0,0*47\r\n");
+  ss.println("$PUBX,40,GLL,0,0,0,0*5C");
+  ss.println("$PUBX,40,ZDA,0,0,0,0*44");
+  ss.println("$PUBX,40,VTG,0,0,0,0*5E");
+  ss.println("$PUBX,40,GSV,0,0,0,0*59");
+  ss.println("$PUBX,40,GSA,0,0,0,0*4E");
+  ss.println("$PUBX,40,RMC,0,0,0,0*47");
+
+  /*
+  const byte Hz5[] = {
+    0xB5, 0x62, 0x06, 0x08, 0x06, 0x00, 0xC8, 0x00, 0x01, 0x00, 0x01, 0x00, 0xDE, 0x6A
+  };
+
+  for (int i = 0; i < sizeof(Hz5); i++) {
+    ss.write(Hz5[i]);
+  }
+  */
 
   // Verificar inicializacion
-  delay(2000);
+  delay(1000);
   if (!ss.available()) {
     return 0;
   }
-
   return 1;
 }
+
 
 
 void gps_wait_signal() {
   while (abs(GPS_LAT) > 90.0 || abs(GPS_LON) > 90.0) {
     gps_read();
+    //delay(100);
   }
 }
+
 
 
 void gps_read() {
