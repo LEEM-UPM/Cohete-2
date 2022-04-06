@@ -33,8 +33,8 @@
 //-------------------------------------------------
 //              Parámetros Cohete
 //-------------------------------------------------
-#define TIEMPO_LANZAMIENTO    240000       // ms (Tiempo de espera desde que hay señal GPS)
-#define ACC_START             5.0          // g
+#define TIEMPO_LANZAMIENTO    20000        // ms (Tiempo de espera desde que hay señal GPS)
+#define ACC_START             2.0          // g
 #define T_MIN_PARACAIDAS      4000         // ms
 #define T_MAX_PARACAIDAS      13000        // ms
 #define DIF_ALTURA_APERTURA   20.0         // m
@@ -46,6 +46,7 @@
 float alt_max = 0.0;
 uint16_t t_inicio = 0;
 #define FLIGHT_TIME millis() - t_inicio
+
 
 
 //-------------------------------------------------
@@ -213,7 +214,6 @@ void setup() {
 #endif
     error_inicio();
   }
-  archivo->close();
 
 
   if (!init_EEPROMI2C() == NULL) {
@@ -274,11 +274,9 @@ void setup() {
     KX134_64g_read_acc();
     if (abs(Z_out) > ACC_START * 2) {
       zumbador_off();
-      archivo = &(SD.open("datos.txt", FILE_WRITE));
       archivo->write(0x41);
       archivo->write(0x41);     // 'DD'
       archivo->flush();
-      archivo->close();
       break;
     }
   }
@@ -307,11 +305,9 @@ void setup() {
     // Aceleración despegue detectada
     if (abs(Z_out) > ACC_START) {
       zumbador_off();
-      archivo = &(SD.open("datos.txt", FILE_WRITE));
       archivo->write(0x41);
       archivo->write(0x41);     // 'DD'
       archivo->flush();
-      archivo->close();
       break;
     }
   }
@@ -326,6 +322,10 @@ void setup() {
 void loop()
 {
 
+  uint16_t tiempo;
+
+  tiempo = millis();
+
 
   Toma_de_datos();
 
@@ -338,11 +338,9 @@ void loop()
   if ( (alt_max > (Altitud_BMP + DIF_ALTURA_APERTURA) && FLIGHT_TIME < T_MIN_PARACAIDAS)  ||  FLIGHT_TIME > T_MAX_PARACAIDAS)  {
     paracaidas_open();
     digitalWrite(PIN_LED_ERROR, 0);
-    archivo = &(SD.open("datos.txt", FILE_WRITE));
     archivo->write(0x41);
     archivo->write(0x41);     // 'AA'
     archivo->flush();
-    archivo->close();
     alt_max = 8000.0;
   }
 
@@ -353,7 +351,10 @@ void loop()
     zumbador_on();
   }
 
-  delay(10);
+  if (millis() - tiempo < 10)
+  {
+    delay(10-millis()+tiempo); //delay de lo que falta para llegar a 10
+  }
 
 }
 
@@ -441,7 +442,8 @@ void Toma_de_datos() {
 
 void SD_Almacena_datos() {
   // Escritura SD
-  archivo = &(SD.open("datos.txt", FILE_WRITE));
+  archivo->write(0x45);
+  archivo->write(0x45);     // 'EE'
   archivo->write((byte)((FLIGHT_TIME & 0xFF00) >> 8));
   archivo->write((byte)(FLIGHT_TIME & 0x00FF));
   archivo->write((byte*)(&X_out), 4);
@@ -459,10 +461,7 @@ void SD_Almacena_datos() {
   archivo->write(GPS_HOU);
   archivo->write(GPS_MIN);
   archivo->write(GPS_SEC);
-  archivo->write(0x45);
-  archivo->write(0x45);     // 'EE'
   archivo->flush();
-  archivo->close();
 }
 
 
