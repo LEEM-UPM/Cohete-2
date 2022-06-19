@@ -33,13 +33,13 @@
 //-------------------------------------------------
 //              Parámetros Cohete
 //-------------------------------------------------
-#define TIEMPO_LANZAMIENTO    20000        // ms (Tiempo de espera desde que hay señal GPS)
+#define TIEMPO_LANZAMIENTO    600000       // ms (Tiempo maximo de espera desde que hay señal GPS)
 #define ACC_START             2.0          // g
 #define T_MIN_PARACAIDAS      4000         // ms
 #define T_MAX_PARACAIDAS      13000        // ms
 #define DIF_ALTURA_APERTURA   20.0         // m
 #define DIF_ALTURA_ALARMA     200.0        // m
-#define T_MIN_ALARMA          30000        // ms
+#define T_MAX_ALARMA          30000        // ms
 
 
 //Control apertura
@@ -114,7 +114,6 @@ uint16_t eeprom_mem = 0;
   unsigned long t_guardar = 0;
 */
 
-
 // Variables
 float X_out;
 float Y_out;
@@ -124,22 +123,6 @@ float Altitud_BMP;
 float Presion_BMP;
 float T_EXT;
 float HALL;
-
-
-
-// Prototipos de funciones:
-void paracaidas_open();
-void paracaidas_close();
-void zumbador_on();
-void zumbador_off();
-void KX134_64g_read_acc();
-boolean KX134_64g_init();
-
-void gps_read();
-boolean gps_init_LOCOSYS_1612G();
-void gps_wait_signal();
-
-boolean init_EEPROMI2C();
 
 
 
@@ -173,14 +156,13 @@ void setup() {
   Wire.begin();
   delay(50);
 
-
+/*
   // Lectura de datos I2C
-  /*
-    EEPROM_I2C_Lectura_datos();
-    while (true) {
+  EEPROM_I2C_Lectura_datos();
+  while (true) {
     delay(1);
-    }
-  */
+  }
+*/
 
 
   if (!KX134_64g_init()) {
@@ -199,6 +181,7 @@ void setup() {
   }
 
 
+  pinMode(SSpin, OUTPUT);
   if (!SD.begin(SSpin)) {
 #if DEBUG == 1
     Serial.println("Error SD");
@@ -237,7 +220,7 @@ void setup() {
 #if DEBUG == 1
   Serial.println("Start OK, waiting for GPS valid signal");
 #endif
-  gps_wait_signal();
+  //gps_wait_signal();
   digitalWrite(PIN_LED_ERROR, 0);
 
 
@@ -283,7 +266,7 @@ void setup() {
 
 
 
-
+  /*
   // 5. DETECTAR ACELRERACIÓN MÁXIMA E INICIAR TOMA DE DATOS
   digitalWrite(PIN_LED_READY, 1);
   var = millis();
@@ -311,7 +294,9 @@ void setup() {
       break;
     }
   }
+  */
 
+  digitalWrite(PIN_LED_READY, 1);
   digitalWrite(PIN_LED_ERROR, 1);
   t_inicio = millis();
 
@@ -347,7 +332,7 @@ void loop()
 
 
   // CONTROL DE ACTIVACION DE ALARMA
-  if ( (alt_max > (Altitud_BMP + DIF_ALTURA_ALARMA)) || FLIGHT_TIME > T_MIN_ALARMA)  {
+  if ( (alt_max > (Altitud_BMP + DIF_ALTURA_ALARMA)) || FLIGHT_TIME > T_MAX_ALARMA)  {
     zumbador_on();
   }
 
@@ -371,15 +356,15 @@ void Toma_de_datos() {
   // Lectura de datos:
   T_BMP = bmp.readTemperature();
   Presion_BMP = bmp.readPressure();
-  Altitud_BMP = bmp.readAltitude(presion_referencia);
+  Altitud_BMP = bmp.readAltitude(); //bmp.readAltitude(presion_referencia);
   KX134_64g_read_acc();
   gps_read();
 
   // Hall
-  HALL = digitalRead(PIN_HALL);
+  HALL = !digitalRead(PIN_HALL);
 
   // Temperatura LM35
-  T_EXT = analogRead(PIN_LM35);
+  T_EXT = (float)analogRead(PIN_LM35);
   T_EXT = T_EXT * 0.488759;
 
 
@@ -419,6 +404,10 @@ void Toma_de_datos() {
 #endif
 
 
+
+  // EEPROM I2C
+  EEPROM_I2C_Almacena_datos();
+
   // Tarjeta SD
   SD_Almacena_datos();
 
@@ -427,8 +416,6 @@ void Toma_de_datos() {
   // EEPROM_Almacena_datos();
 
 
-  // EEPROM I2C
-  EEPROM_I2C_Almacena_datos();
 
 }
 
@@ -444,8 +431,8 @@ void SD_Almacena_datos() {
   // Escritura SD
   archivo->write(0x45);
   archivo->write(0x45);     // 'EE'
-  archivo->write((byte)((FLIGHT_TIME & 0xFF00) >> 8));
   archivo->write((byte)(FLIGHT_TIME & 0x00FF));
+  archivo->write((byte)((FLIGHT_TIME & 0xFF00) >> 8));
   archivo->write((byte*)(&X_out), 4);
   archivo->write((byte*)(&Y_out), 4);
   archivo->write((byte*)(&Z_out), 4);
@@ -485,14 +472,15 @@ boolean init_EEPROMI2C() {
 void EEPROM_I2C_Almacena_datos() {
 
   byte paquete[30];  // No se pueden guardar paquetes superiores a 30 bytes
-  float_to_4byte(&Z_out, &(paquete[0]));
-  float_to_4byte(&X_out, &(paquete[4]));
-  float_to_4byte(&Y_out, &(paquete[8]));
-  float_to_4byte(&Presion_BMP, &(paquete[12]));
-  float_to_4byte(&Altitud_BMP, &(paquete[16]));
-  float_to_4byte(&GPS_LAT, &(paquete[20]));
-  float_to_4byte(&GPS_LON, &(paquete[24]));
-  uint16_to_2byte(FLIGHT_TIME, &(paquete[28]));
+  uint16_t aux = FLIGHT_TIME;
+  uint16_to_2byte(aux, &(paquete[0]));
+  float_to_4byte(&Z_out, &(paquete[2]));
+  float_to_4byte(&X_out, &(paquete[6]));
+  float_to_4byte(&Y_out, &(paquete[10]));
+  float_to_4byte(&Presion_BMP, &(paquete[14]));
+  float_to_4byte(&Altitud_BMP, &(paquete[18]));
+  float_to_4byte(&GPS_LAT, &(paquete[22]));
+  float_to_4byte(&GPS_LON, &(paquete[26]));
 
   writeEEPROM_Page(eeprom_mem, paquete, 30);
   eeprom_mem += 30;
@@ -501,15 +489,13 @@ void EEPROM_I2C_Almacena_datos() {
 
 
 // Almacenar máximo 30 bytes seguidos
-void writeEEPROM_Page(uint16_t address, byte *val, uint16_t tam) {
+void writeEEPROM_Page(uint16_t address, byte *val, byte tam) {
   Wire.beginTransmission(EEPROM_I2C_ADDRESS);
   Wire.write((uint8_t)(address >> 8));   // MSB
   Wire.write((uint8_t)(address & 0xFF)); // LSB
-  for (uint16_t i = 0; i < tam; i++) {
-    Wire.write(*val);
-    val++;
-  }
+  Wire.write(val,tam);
   Wire.endTransmission();
+  delay(10);
 }
 
 
@@ -536,8 +522,8 @@ void _4byte_to_float(byte* aux, float *out) {
 
 // Guardar el uint16_t MSB, LSB
 void uint16_to_2byte(uint16_t dato_in, byte* dir_dato_out) {
-  *(dir_dato_out) = (byte)dato_in;
-  *(dir_dato_out + 1) = (byte)(dato_in >> 8);
+  *(dir_dato_out) = (byte)(dato_in >> 8);
+  *(dir_dato_out + 1) = (byte)dato_in;
 }
 
 
@@ -555,14 +541,16 @@ void EEPROM_I2C_Lectura_datos() {
     }
     eeprom_mem += 30;
 
+    tim = paquete[1];
+    tim += ((uint16_t)paquete[0]) << 8;
+    Serial.print(tim);
+    Serial.write('\t');
+    
     for (int k = 0; k < 7; k++) {
-      _4byte_to_float(&(paquete[k * 4]), &(aux[k]));
+      _4byte_to_float(&(paquete[k * 4 + 2]), &(aux[k]));
       Serial.print(aux[k], 5);
       Serial.write('\t');
     }
-    tim = paquete[28] + paquete[29] * 256;
-    Serial.print(tim, 5);
-    Serial.write('\t');
 
     Serial.write('\n');
   }
